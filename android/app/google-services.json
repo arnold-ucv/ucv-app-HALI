@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "862203912888",
+    "project_id": "hali-gestion-ucv-2026",
+    "storage_bucket": "hali-gestion-ucv-2026.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:862203912888:android:bc4c71c73b23296b938a4d",
+        "android_client_info": {
+          "package_name": "pe.hali.gestion"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD2DLCzJ0JVHkdtamKpwH5V_gLVHRSrd-k"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

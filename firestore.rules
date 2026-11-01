@@ -1,0 +1,136 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function self() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function active() { return signedIn() && self().active == true; }
+    function role() { return self().role; }
+    function manager() { return active() && role() in ['ventas', 'admin']; }
+    function admin() { return active() && role() == 'admin'; }
+    function driver() { return active() && role() == 'reparto'; }
+    function statusChange() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['status', 'updatedAt', 'history', 'driverUid'])
+        && request.resource.data.history.size() == resource.data.history.size() + 1
+        && request.resource.data.history.hasAll(resource.data.history)
+        && request.resource.data.history[request.resource.data.history.size() - 1].from == resource.data.status
+        && request.resource.data.history[request.resource.data.history.size() - 1].to == request.resource.data.status
+        && request.resource.data.history[request.resource.data.history.size() - 1].by == request.auth.uid;
+    }
+    function nextStatus() {
+      return (resource.data.status == 'recibido' && request.resource.data.status in ['confirmado', 'cancelado'])
+        || (resource.data.status == 'confirmado' && request.resource.data.status in ['preparado', 'cancelado'])
+        || (resource.data.status == 'preparado' && request.resource.data.status in ['en reparto', 'cancelado'])
+        || (resource.data.status == 'en reparto' && request.resource.data.status in ['entregado', 'incidencia'])
+        || (resource.data.status == 'incidencia' && request.resource.data.status in ['en reparto', 'cancelado']);
+    }
+    match /users/{userId} {
+      allow create: if signedIn() && userId == request.auth.uid
+        && request.resource.data.role == 'cliente' && request.resource.data.active == true
+        && request.resource.data.keys().hasOnly(['name', 'email', 'role', 'active']);
+      allow get: if active() && (userId == request.auth.uid || manager());
+      allow list: if manager();
+      allow update: if admin() && userId != request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'active'])
+        && request.resource.data.role in ['cliente', 'ventas', 'reparto', 'admin'];
+    }
+    match /products/{productId} {
+      allow read: if active();
+      allow create, update: if manager();
+    }
+    match /variants/{variantId} {
+      allow read: if active();
+      allow create, update: if manager()
+        && request.resource.data.priceCents is int
+        && request.resource.data.priceCents > 0;
+    }
+    match /orders/{orderId} {
+      function orderVariant() {
+        return get(/databases/$(database)/documents/variants/$(request.resource.data.variantId)).data;
+      }
+      function activeOrderProduct() {
+        return get(/databases/$(database)/documents/products/$(orderVariant().productId)).data.active == true;
+      }
+      function validDriver() {
+        return request.resource.data.driverUid is string
+          && request.resource.data.driverUid != ''
+          && get(/databases/$(database)/documents/users/$(request.resource.data.driverUid)).data.role == 'reparto'
+          && get(/databases/$(database)/documents/users/$(request.resource.data.driverUid)).data.active == true;
+      }
+      function paymentChange() {
+        let e = getAfter(/databases/$(database)/documents/payments/$(request.resource.data.paymentEventId)).data;
+        return request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['paid', 'paidAt', 'paymentMethod', 'paymentEventId'])
+          && request.resource.data.paid != resource.data.paid
+          && e.orderId == orderId && e.by == request.auth.uid
+          && ((driver() && resource.data.driverUid == request.auth.uid
+               && resource.data.status in ['en reparto', 'entregado']
+               && resource.data.paid == false
+               && request.resource.data.paid == true && e.type == 'cobro'
+               && e.amountCents == resource.data.totalCents
+               && e.method in ['Efectivo', 'Yape', 'Plin', 'Transferencia']
+               && request.resource.data.paymentMethod == e.method
+               && request.resource.data.paidAt == e.at)
+            || (admin() && request.resource.data.paid == false
+               && e.type == 'anulación'
+               && e.amountCents == -resource.data.totalCents));
+      }
+      allow read: if active() && (resource.data.customerUid == request.auth.uid
+        || manager() || (driver() && resource.data.driverUid == request.auth.uid));
+      allow create: if active() && (request.resource.data.customerUid == request.auth.uid || manager())
+        && request.resource.data.status == 'recibido'
+        && request.resource.data.paid == false
+        && request.resource.data.quantity is int
+        && request.resource.data.quantity > 0
+        && request.resource.data.quantity <= 99
+        && orderVariant().available == true
+        && activeOrderProduct()
+        && request.resource.data.unitPriceCents ==
+           orderVariant().priceCents
+        && request.resource.data.totalCents ==
+           request.resource.data.unitPriceCents * request.resource.data.quantity;
+      allow update: if active() && (
+        (statusChange() && nextStatus()
+         && (request.resource.data.status != 'cancelado' || resource.data.paid != true)
+         && (request.resource.data.driverUid == resource.data.driverUid
+             || request.resource.data.status == 'en reparto')
+         && (request.resource.data.status != 'en reparto' || validDriver())
+         && (request.resource.data.status != 'incidencia'
+             || request.resource.data.history[request.resource.data.history.size() - 1].note != '')
+         && (
+          manager()
+          || (driver() && resource.data.driverUid == request.auth.uid
+              && request.resource.data.status in ['entregado', 'incidencia']
+              && resource.data.status == 'en reparto')
+          || (resource.data.customerUid == request.auth.uid
+              && resource.data.status == 'recibido'
+              && request.resource.data.status == 'cancelado')
+        ))
+        || paymentChange()
+      );
+    }
+    match /payments/{paymentId} {
+      allow read: if manager();
+      allow create: if active()
+        && request.resource.data.orderId is string
+        && request.resource.data.by == request.auth.uid
+        && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.paymentEventId == paymentId
+        && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.paid !=
+           get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.paid
+        && (
+          (driver() && request.resource.data.type == 'cobro'
+           && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.driverUid == request.auth.uid
+           && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.status in ['en reparto', 'entregado']
+           && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.paid == false
+           && request.resource.data.method in ['Efectivo', 'Yape', 'Plin', 'Transferencia']
+           && request.resource.data.amountCents ==
+              get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.totalCents)
+          || (admin() && request.resource.data.type == 'anulación'
+           && request.resource.data.amountCents ==
+              -get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.totalCents)
+        );
+    }
+  }
+}
